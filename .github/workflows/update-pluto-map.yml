@@ -1,0 +1,41 @@
+name: Update Pluto Episode Map
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "35 9 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  update-map:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependency
+        run: pip install requests
+
+      - name: Generate Pluto One Piece direct-link map
+        run: python generate_pluto_map.py
+
+      - name: Commit updated Pluto map
+        shell: bash
+        run: |
+          if git diff --quiet -- pluto-map.json; then
+            echo "Pluto map is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pluto-map.json
+          git commit -m "Update Pluto One Piece episode map"
+          git push
