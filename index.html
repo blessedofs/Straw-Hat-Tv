@@ -422,6 +422,16 @@
               <button class="btn btn-small btn-ghost" id="crMapClear">Clear Imported Links</button>
             </div>
           </details>
+          <details class="cr-map-tools" style="margin-top:10px">
+            <summary style="cursor:pointer;font-weight:800">Netflix U.S. Direct-Link Map <span class="muted tiny" id="nfMapCount"></span></summary>
+            <p class="muted tiny" style="line-height:1.55">Paste a JSON map of One Piece episode numbers to verified Netflix U.S. <strong>/watch/</strong> URLs. Straw Hat TV will only show <strong>Watch Episode</strong> when an exact Netflix episode link has been verified.</p>
+            <textarea id="nfMapInput" rows="6" spellcheck="false" style="width:100%;resize:vertical;border-radius:12px;padding:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:white" placeholder='{"1":"https://www.netflix.com/watch/12345678","2":"https://www.netflix.com/watch/23456789"}'></textarea>
+            <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+              <button class="btn btn-small btn-primary" id="nfMapImport">Import Map</button>
+              <button class="btn btn-small btn-ghost" id="nfMapExport">Copy Current Map</button>
+              <button class="btn btn-small btn-ghost" id="nfMapClear">Clear Imported Links</button>
+            </div>
+          </details>
         </div>
       </div>
     </section>
@@ -500,7 +510,7 @@
   </main>
 
   <footer class="footer container">
-    <strong>Straw Hat TV</strong> stores your watch progress locally in your browser. Episode metadata syncs from Jikan/MyAnimeList; streaming buttons open official services and do not host video.
+    <strong>Straw Hat TV</strong> stores your watch progress locally in your browser. Episode metadata syncs from Jikan/MyAnimeList; streaming buttons open official services and do not host video. Netflix mapping is locked to verified U.S. /watch/ links.
   </footer>
 
   <div class="toast" id="toast"></div>
@@ -695,7 +705,7 @@
 
     const K = {
       watched:'shtv_watched_v2', favorites:'shtv_favorites_v2', recent:'shtv_recent_v2', current:'shtv_current_v2',
-      cache:'shtv_episode_cache_v2', cacheTime:'shtv_episode_cache_time_v2', summaries:'shtv_episode_summaries_v1', summariesTime:'shtv_episode_summaries_time_v1', lastSource:'shtv_last_source_v2', crMap:'shtv_crunchyroll_map_v1', fillerSkip:'shtv_filler_skip_v1'
+      cache:'shtv_episode_cache_v2', cacheTime:'shtv_episode_cache_time_v2', summaries:'shtv_episode_summaries_v1', summariesTime:'shtv_episode_summaries_time_v1', lastSource:'shtv_last_source_v2', crMap:'shtv_crunchyroll_map_v1', nfMap:'shtv_netflix_map_us_v1', fillerSkip:'shtv_filler_skip_v1'
     };
 
     // Some file previews and privacy-restricted browsers block localStorage.
@@ -780,6 +790,64 @@
         refreshAll();
       } catch (e) {
         // Expected when no external map exists or cross-origin loading is blocked.
+      }
+    }
+
+    function normalizeNetflixMap(raw) {
+      const out = {};
+      if (!raw || typeof raw !== 'object') return out;
+      for (const [key, value] of Object.entries(raw)) {
+        const id = Number(key);
+        const url = typeof value === 'string' ? value.trim() : '';
+        if (!Number.isInteger(id) || id < 1 || id > 5000) continue;
+        if (!/^https:\/\/(www\.)?netflix\.com\/watch\/\d+(?:\?[^\s]*)?$/i.test(url)) continue;
+        out[id] = url;
+      }
+      return out;
+    }
+
+    let NETFLIX_DIRECT = {
+      ...normalizeNetflixMap(safeParse(storage.getItem(K.nfMap), {}))
+    };
+
+    function saveNetflixMap() {
+      storage.setItem(K.nfMap, JSON.stringify(NETFLIX_DIRECT));
+      updateNetflixMapStatus();
+    }
+
+    function updateNetflixMapStatus() {
+      const count = Object.keys(NETFLIX_DIRECT).length;
+      const el = document.getElementById('nfMapCount');
+      if (el) el.textContent = `${count} direct U.S. episode link${count === 1 ? '' : 's'} mapped`;
+    }
+
+    function importNetflixMap(rawText) {
+      const parsed = safeParse(rawText, null);
+      const source = parsed && parsed.episodes && typeof parsed.episodes === 'object' ? parsed.episodes : parsed;
+      const normalized = normalizeNetflixMap(source);
+      const count = Object.keys(normalized).length;
+      if (!count) throw new Error('No valid Netflix /watch/ links were found in that JSON.');
+      NETFLIX_DIRECT = {...normalized};
+      saveNetflixMap();
+      refreshAll();
+      return count;
+    }
+
+    async function tryLoadExternalNetflixMap() {
+      // Place netflix-map.json beside index.html on GitHub Pages.
+      if (location.protocol === 'file:') return;
+      try {
+        const response = await fetch('netflix-map.json', {cache:'no-store'});
+        if (!response.ok) return;
+        const json = await response.json();
+        const source = json && json.episodes && typeof json.episodes === 'object' ? json.episodes : json;
+        const normalized = normalizeNetflixMap(source);
+        if (!Object.keys(normalized).length) return;
+        NETFLIX_DIRECT = {...NETFLIX_DIRECT, ...normalized};
+        saveNetflixMap();
+        refreshAll();
+      } catch (e) {
+        // Expected before netflix-map.json exists or if loading is blocked.
       }
     }
 
@@ -990,7 +1058,11 @@
       const query = encodeURIComponent(`One Piece Episode ${ep.id} ${ep.title}`);
       if (source === 'pluto') return plutoInfo(ep.id);
       if (source === 'netflix') {
-        return {available:true,url:SERIES_URLS.netflix,label:'Open Netflix',note:`Opens One Piece on Netflix U.S. for Episode ${ep.id}. Netflix controls per-episode availability.`,status:'NETFLIX U.S.',statusClass:'available'};
+        const direct = NETFLIX_DIRECT[ep.id];
+        if (direct) {
+          return {available:true,url:direct,label:'▶ Watch Episode',note:`Verified direct Netflix U.S. link for Episode ${ep.id}`,status:'DIRECT EPISODE • U.S.',statusClass:'available',direct:true};
+        }
+        return {available:true,url:SERIES_URLS.netflix,label:'Open Netflix',note:`Exact Netflix U.S. episode link is not mapped yet; opens the One Piece series page.`,status:'NETFLIX U.S. • UNMAPPED',statusClass:'search',direct:false};
       }
       const direct = CRUNCHYROLL_DIRECT[ep.id];
       if (direct) {
@@ -1299,7 +1371,7 @@
             <div class="ep-title">${escapeHtml(ep.title)}</div>
             <div class="ep-meta">${escapeHtml(ep.arc)} • ${escapeHtml(ep.saga)}${aired?` • ${escapeHtml(aired)}`:''}</div>
             <div class="tagline"><span class="tag ${ep.filler?'filler':''}">${escapeHtml(type)}</span>${ep.score?`<span class="tag">★ ${Number(ep.score).toFixed(1)}</span>`:''}${ep.id===currentId?'<span class="tag">Current episode</span>':''}</div>
-            <div class="watch-row">${['pluto','netflix','crunchyroll'].map(source=>{const info=sourceInfo(source,ep); const cls=source==='pluto'?' pluto':source==='netflix'?' netflix':''; const label=source==='pluto'?(info.direct?'Pluto ▶':'Pluto ↗'):source==='netflix'?'Netflix':(info.direct?'Crunchyroll ▶':'Crunchyroll 🔎'); return `<button class="watch-link${cls}${info.available?'':' disabled'}" data-source="${source}" data-id="${ep.id}" ${info.available?'':'disabled'} title="${escapeHtml(info.note)}">${label}${info.available?'':' • N/A'}</button>`;}).join('')}</div>
+            <div class="watch-row">${['pluto','netflix','crunchyroll'].map(source=>{const info=sourceInfo(source,ep); const cls=source==='pluto'?' pluto':source==='netflix'?' netflix':''; const label=source==='pluto'?(info.direct?'Pluto ▶':'Pluto ↗'):source==='netflix'?(info.direct?'Netflix ▶':'Netflix ↗'):(info.direct?'Crunchyroll ▶':'Crunchyroll 🔎'); return `<button class="watch-link${cls}${info.available?'':' disabled'}" data-source="${source}" data-id="${ep.id}" ${info.available?'':'disabled'} title="${escapeHtml(info.note)}">${label}${info.available?'':' • N/A'}</button>`;}).join('')}</div>
             <div class="ep-actions"><button class="icon-btn ${isWatched?'on':''}" data-action="watched" data-id="${ep.id}">${isWatched?'↩ Unwatch':'✓ Watched'}</button><button class="icon-btn ${isFav?'on':''}" data-action="favorite" data-id="${ep.id}">${isFav?'★ Favorite':'☆ Favorite'}</button><button class="icon-btn" data-action="current" data-id="${ep.id}">▶ Set Current</button></div>
           </div>
         </article>`;
@@ -1381,14 +1453,37 @@
       refreshAll();
       toast('Imported Crunchyroll links cleared.');
     });
+    $('nfMapImport').addEventListener('click',()=>{
+      try {
+        const count = importNetflixMap($('nfMapInput').value);
+        $('nfMapInput').value = '';
+        toast(`Imported ${count} Netflix U.S. direct links.`);
+      } catch (e) {
+        toast(e.message || 'Could not import Netflix map.');
+      }
+    });
+    $('nfMapExport').addEventListener('click',async()=>{
+      const payload = JSON.stringify({series:'One Piece',region:'US',netflixTitleId:'80107103',episodes:NETFLIX_DIRECT}, null, 2);
+      try { await navigator.clipboard.writeText(payload); toast('Netflix U.S. map copied.'); }
+      catch (e) { $('nfMapInput').value = payload; $('nfMapInput').focus(); toast('Map placed in the box for copying.'); }
+    });
+    $('nfMapClear').addEventListener('click',()=>{
+      storage.removeItem(K.nfMap);
+      NETFLIX_DIRECT = {};
+      updateNetflixMapStatus();
+      refreshAll();
+      toast('Imported Netflix links cleared.');
+    });
     $('detailWatched').addEventListener('click',()=>detailId&&markWatched(detailId));
     $('detailFavorite').addEventListener('click',()=>detailId&&toggleFavorite(detailId));
     $('detailCurrent').addEventListener('click',()=>{if(detailId){setCurrent(detailId);openDetail(detailId);toast(`Episode ${detailId} set as current`);}});
 
     updateCrunchyrollMapStatus();
+    updateNetflixMapStatus();
     refreshAll();
     tryLoadExternalCrunchyrollMap();
     tryLoadExternalPlutoMap();
+    tryLoadExternalNetflixMap();
     fetchFullGuide(false);
     ensureEpisodeSummaries(false).then(ok=>{ if(ok) refreshAll(); });
   </script>
