@@ -25,7 +25,7 @@ jobs:
         run: pip install "git+https://github.com/PD-Codes/crunchyroll-api.git"
 
       - name: Generate One Piece direct-link map
-        run: python scripts/generate_crunchyroll_map.py
+        run: python generate_crunchyroll_map.py
 
       - name: Commit updated map
         shell: bash
