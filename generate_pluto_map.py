@@ -2,29 +2,32 @@
 """
 Generate pluto-map.json for One Piece on Pluto TV.
 
-This version uses TVMaze for the numbered One Piece episode list instead of
-Jikan. TVMaze show ID 1505 is One Piece.
+Current Pluto flow:
+1. Get a temporary session token from boot.pluto.tv/v4/start.
+2. Query the v4 VOD seasons endpoint for One Piece.
+3. Match Pluto episode titles against TVMaze's numbered One Piece list.
+4. Write exact Pluto episode-page URLs into pluto-map.json.
 
-The script:
-1. Gets all normal One Piece episodes from TVMaze in airing order.
-2. Gets Pluto's One Piece VOD season/episode metadata.
-3. Matches Pluto titles to the corresponding numbered anime episodes.
-4. Writes direct Pluto episode URLs to pluto-map.json.
-
-Only public metadata/page IDs are used. No video streams are copied.
+This only uses public metadata and page IDs. It does not copy or proxy video.
 """
 
+import datetime
 import json
 import re
 import time
 import unicodedata
+import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
 
 import requests
 
 PLUTO_SERIES_ID = "1550009"
-PLUTO_API = f"https://api.pluto.tv/v3/vod/series/{PLUTO_SERIES_ID}/seasons"
+PLUTO_BOOT_URL = "https://boot.pluto.tv/v4/start"
+PLUTO_SEASONS_URL = (
+    f"https://service-vod.clusters.pluto.tv/v4/vod/series/"
+    f"{PLUTO_SERIES_ID}/seasons"
+)
 PLUTO_SHOW_BASE = f"https://pluto.tv/us/shows/{PLUTO_SERIES_ID}/episode"
 
 TVMAZE_SHOW_ID = "1505"
@@ -39,13 +42,20 @@ SESSION.headers.update({
         "(KHTML, like Gecko) Chrome/129 Safari/537.36"
     ),
     "Accept": "application/json,text/plain,*/*",
+    "Origin": "https://pluto.tv",
+    "Referer": "https://pluto.tv/",
 })
 
-def get_json(url, params=None, retries=4, pause=2):
+def get_json(url, params=None, headers=None, retries=4, pause=2):
     last = None
     for attempt in range(retries):
         try:
-            r = SESSION.get(url, params=params, timeout=30)
+            r = SESSION.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=30,
+            )
             r.raise_for_status()
             return r.json()
         except Exception as exc:
@@ -60,34 +70,30 @@ def normalize_title(value):
     s = unicodedata.normalize("NFKD", str(value))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = s.lower().replace("&", " and ")
-
-    # Normalize punctuation and common formatting differences.
     s = s.replace("’", "'").replace("–", "-").replace("—", "-")
     s = re.sub(r"\bone piece\b", " ", s)
     s = re.sub(r"\bepisode\s*\d+\b", " ", s)
     s = re.sub(r"[^a-z0-9]+", " ", s)
-
     return " ".join(s.split())
 
 def title_similarity(a, b):
     a = normalize_title(a)
     b = normalize_title(b)
+
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
+
     if a in b or b in a:
         shorter = min(len(a), len(b))
         longer = max(len(a), len(b))
         if longer and shorter / longer >= 0.72:
             return 0.95
+
     return SequenceMatcher(None, a, b).ratio()
 
 def fetch_tvmaze_titles():
-    """
-    TVMaze returns regular episodes in airing order.
-    One Piece's regular anime numbering follows that order, so enumerate from 1.
-    """
     payload = get_json(TVMAZE_API)
 
     if not isinstance(payload, list) or not payload:
@@ -96,18 +102,36 @@ def fetch_tvmaze_titles():
     titles = {}
 
     for global_number, ep in enumerate(payload, start=1):
-        names = []
-
-        name = ep.get("name")
-        if name:
-            names.append(name)
-
-        # Some recent TVMaze entries can temporarily be named "Episode 1180".
-        # Keep it, but matching will naturally prefer real title matches.
-        titles[global_number] = names or [f"Episode {global_number}"]
+        title = ep.get("name") or f"Episode {global_number}"
+        titles[global_number] = [title]
 
     print(f"TVMaze returned {len(titles)} numbered One Piece episodes.")
     return titles
+
+def fetch_pluto_token():
+    params = {
+        "appName": "web",
+        "appVersion": "8.0.0",
+        "deviceVersion": "129.0.0",
+        "deviceModel": "web",
+        "deviceMake": "chrome",
+        "deviceType": "web",
+        "clientID": str(uuid.uuid4()),
+        "clientModelNumber": "1.0.0",
+        "serverSideAds": "false",
+        "drmCapabilities": "widevine:L3",
+        "seriesIDs": PLUTO_SERIES_ID,
+        "clientTime": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+
+    payload = get_json(PLUTO_BOOT_URL, params=params)
+    token = payload.get("sessionToken")
+
+    if not token:
+        raise RuntimeError("Pluto boot API returned no sessionToken.")
+
+    print("Pluto boot token acquired.")
+    return token
 
 def looks_like_episode(obj):
     if not isinstance(obj, dict):
@@ -115,6 +139,7 @@ def looks_like_episode(obj):
 
     content_id = obj.get("_id") or obj.get("id") or obj.get("contentId")
     title = obj.get("name") or obj.get("title")
+    kind = str(obj.get("type") or obj.get("kind") or "").lower()
 
     has_episode_marker = any(
         key in obj
@@ -126,8 +151,6 @@ def looks_like_episode(obj):
             "number",
         )
     )
-
-    kind = str(obj.get("type") or obj.get("kind") or "").lower()
 
     return bool(
         content_id
@@ -143,6 +166,7 @@ def walk_episode_objects(node, out, seen):
                 or node.get("id")
                 or node.get("contentId")
             )
+
             if cid not in seen:
                 seen.add(cid)
                 out.append(node)
@@ -155,32 +179,32 @@ def walk_episode_objects(node, out, seen):
             walk_episode_objects(value, out, seen)
 
 def fetch_pluto_episodes():
-    # Pluto sometimes behaves differently depending on web headers.
-    old_headers = dict(SESSION.headers)
-    SESSION.headers.update({
+    token = fetch_pluto_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json,text/plain,*/*",
         "Origin": "https://pluto.tv",
         "Referer": "https://pluto.tv/",
-    })
+        "User-Agent": SESSION.headers["User-Agent"],
+    }
 
-    try:
-        payload = get_json(
-            PLUTO_API,
-            params={
-                "includeItems": "true",
-                "deviceType": "web",
-            },
-        )
-    finally:
-        SESSION.headers.clear()
-        SESSION.headers.update(old_headers)
+    payload = get_json(
+        PLUTO_SEASONS_URL,
+        params={
+            "offset": "1000",
+            "page": "1",
+        },
+        headers=headers,
+    )
 
     episodes = []
     walk_episode_objects(payload, episodes, set())
 
     if not episodes:
         raise RuntimeError(
-            "Pluto returned no episode objects. "
-            "Its catalog endpoint may have changed."
+            "Pluto v4 returned no episode objects. "
+            "The catalog shape may have changed."
         )
 
     print(f"Pluto returned {len(episodes)} episode objects.")
@@ -195,10 +219,12 @@ def possible_episode_number(obj):
         "number",
     ):
         value = obj.get(key)
+
         if value is None:
             continue
 
         match = re.search(r"\d+", str(value))
+
         if match:
             return int(match.group())
 
@@ -206,6 +232,7 @@ def possible_episode_number(obj):
 
 def best_match(title, canonical_titles, used):
     nt = normalize_title(title)
+
     if not nt:
         return None, 0.0
 
@@ -228,7 +255,10 @@ def best_match(title, canonical_titles, used):
         if num in used:
             continue
 
-        score = max(title_similarity(title, v) for v in variants)
+        score = max(
+            title_similarity(title, variant)
+            for variant in variants
+        )
 
         if score > best_score:
             best_score = score
@@ -247,13 +277,9 @@ def main():
     details = {}
     used = set()
     unmatched = []
-
     leftovers = []
 
-    # First pass:
-    # If Pluto exposes an episode number, accept it only when the title also
-    # strongly agrees. This prevents season-local numbering from being mistaken
-    # for global One Piece episode numbering.
+    # First pass: episode number + title agreement.
     for item in pluto_eps:
         title = item.get("name") or item.get("title") or ""
         cid = str(
@@ -282,8 +308,7 @@ def main():
 
         leftovers.append(item)
 
-    # Second pass:
-    # Match remaining Pluto episodes by title.
+    # Second pass: title matching.
     for item in leftovers:
         title = item.get("name") or item.get("title") or ""
         cid = str(
@@ -298,7 +323,6 @@ def main():
             used,
         )
 
-        # Keep this threshold conservative. Wrong links are worse than missing ones.
         if num is not None and score >= 0.78:
             mapped[str(num)] = make_pluto_url(cid)
             details[str(num)] = {
@@ -333,7 +357,7 @@ def main():
         "series": "One Piece",
         "plutoSeriesId": PLUTO_SERIES_ID,
         "referenceSource": "TVMaze One Piece show 1505",
-        "source": "Generated by GitHub Actions from public catalog metadata",
+        "source": "Generated by GitHub Actions from Pluto TV v4 catalog metadata",
         "mappedCount": len(mapped),
         "plutoEpisodeObjectsFound": len(pluto_eps),
         "episodes": mapped,
@@ -354,13 +378,11 @@ def main():
     print(f"Mapped {len(mapped)} direct Pluto episode links.")
     print(f"Unmatched Pluto episode objects: {len(unmatched)}")
 
-    # Fail visibly instead of silently committing an empty/broken map.
     if len(mapped) < 25:
         raise RuntimeError(
             f"Only {len(mapped)} Pluto episodes mapped. "
-            "The Pluto catalog structure may have changed."
+            "Refusing to treat this as a successful update."
         )
 
 if __name__ == "__main__":
     main()
-    
