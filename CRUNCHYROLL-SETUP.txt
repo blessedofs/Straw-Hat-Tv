@@ -1,0 +1,23 @@
+STRAW HAT TV — FULL CRUNCHYROLL DIRECT-LINK SETUP
+
+Upload this folder structure to the same GitHub repository as your Straw Hat TV site:
+
+index.html
+crunchyroll-map.json
+scripts/generate_crunchyroll_map.py
+.github/workflows/update-crunchyroll-map.yml
+
+Then on GitHub:
+1. Open the repository.
+2. Tap/click Actions.
+3. Choose "Update Crunchyroll Episode Map".
+4. Choose "Run workflow".
+5. When it finishes, refresh your GitHub Pages site.
+
+The workflow scans Crunchyroll's public One Piece catalog metadata anonymously,
+creates direct https://www.crunchyroll.com/watch/EPISODE_ID links, and writes them
+to crunchyroll-map.json. Straw Hat TV already auto-loads crunchyroll-map.json.
+
+The workflow also runs every Monday to pick up newly added episodes.
+
+No Crunchyroll username or password is stored in the website or GitHub repository.
