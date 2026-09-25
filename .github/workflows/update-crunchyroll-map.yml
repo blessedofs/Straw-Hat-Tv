@@ -1,0 +1,41 @@
+name: Update Crunchyroll Episode Map
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 9 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  update-map:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Crunchyroll metadata client
+        run: pip install "git+https://github.com/PD-Codes/crunchyroll-api.git"
+
+      - name: Generate One Piece direct-link map
+        run: python scripts/generate_crunchyroll_map.py
+
+      - name: Commit updated map
+        shell: bash
+        run: |
+          if git diff --quiet -- crunchyroll-map.json; then
+            echo "Crunchyroll map is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crunchyroll-map.json
+          git commit -m "Update Crunchyroll One Piece episode map"
+          git push
