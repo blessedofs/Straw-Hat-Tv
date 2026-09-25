@@ -1,0 +1,20 @@
+PLUTO TV SETUP FOR STRAW HAT TV
+
+Upload these files to the root of your Straw-Hat-Tv GitHub repository:
+- index.html
+- generate_pluto_map.py
+- pluto-map.json
+
+Create/keep this exact workflow path:
+.github/workflows/update-pluto-map.yml
+
+Then:
+1. GitHub -> Actions
+2. Open "Update Pluto Episode Map"
+3. Click "Run workflow"
+4. When it finishes, open pluto-map.json
+5. A successful run should show mappedCount greater than 0.
+6. Refresh Straw Hat TV. The site automatically reads pluto-map.json.
+
+The generator maps Pluto's public One Piece catalog metadata to numbered
+One Piece episodes and only turns high-confidence matches into direct links.
